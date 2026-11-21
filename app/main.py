@@ -25,11 +25,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="地方志单页标注迁移 API",
     description=(
-        "录入旧稿、补标、换稿，并查询现行版号、迁入标注与待复核清单。\n\n"
+        "录入旧稿、补标、换稿，并查询现行版号、迁入标注与待复核清单；\n\n"
+        "外发补标时可按标注编号遮盖受访者姓名，回收外发稿坐标后再入标注库。\n\n"
         "字符区间基于**去除换行后**的正文；两稿对齐只允许插字和删字。"
-        "补标与换稿都必须携带所见版号，过期会被拒绝并返回现行版号。"
+        "补标、换稿与外发都携带所见版号，过期会被拒绝并返回现行版号。"
     ),
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan,
 )
 
@@ -86,6 +87,44 @@ class ReplaceIn(BaseModel):
         ...,
         description="新稿全文；换行会被去掉后再计字符，去换行后最多 500 字符",
         examples=["光绪《XX县志》卷三：城东有永安桥，跨白水河。桥始建于明。"],
+    )
+
+
+class DispatchPackIn(BaseModel):
+    version: StrictInt = Field(..., description="所见现行版号", ge=1)
+    mask_annotation_ids: list[StrictInt] = Field(
+        ...,
+        min_length=1,
+        description=(
+            "要遮盖的标注编号（必须属于该版）。相交的区间会合并，"
+            "每段遮盖成一个「□」"
+        ),
+        examples=[[1, 2]],
+    )
+
+
+class ReturnedIntervalIn(BaseModel):
+    start: StrictInt = Field(
+        ..., description="外发稿区间起点（含），基于遮盖后的正文", ge=0
+    )
+    end: StrictInt = Field(
+        ..., description="外发稿区间终点（不含），须完整落在同一段未遮盖原文内", ge=1
+    )
+    label: StrictStr = Field(
+        ..., min_length=1, description="标注内容，例如地名", examples=["永安桥"]
+    )
+
+
+class DispatchClaimIn(BaseModel):
+    annotations: list[ReturnedIntervalIn] = Field(
+        ...,
+        description="外发稿中的标注区间；任一区间无效则整包退回",
+        examples=[
+            [
+                {"start": 0, "end": 3, "label": "武昌府"},
+                {"start": 6, "end": 8, "label": "永安桥"},
+            ]
+        ],
     )
 
 
@@ -190,3 +229,65 @@ def get_reviews(
     conn: sqlite3.Connection = Depends(get_conn),
 ):
     return service.get_reviews(conn, version)
+
+
+@app.post(
+    "/api/dispatch-packs",
+    tags=["外发补标"],
+    summary="创建外发补标包（遮盖受访者姓名）",
+    description=(
+        "按编校员给定的现行版号与标注编号，把正文中对应区间遮盖成「□」后打包。"
+        "相交的遮盖区间合并为一段，每段只保留一个「□」。"
+        "响应只返回包号与遮盖后的正文，供外发标注使用。"
+    ),
+)
+def create_dispatch_pack(
+    payload: DispatchPackIn, conn: sqlite3.Connection = Depends(get_conn)
+):
+    return service.create_dispatch_pack(
+        conn,
+        seen_version=payload.version,
+        mask_annotation_ids=payload.mask_annotation_ids,
+    )
+
+
+@app.get(
+    "/api/dispatch-packs/{pack_no}",
+    tags=["外发补标"],
+    summary="查询外发补标包（包号与遮盖后正文）",
+)
+def get_dispatch_pack(pack_no: str, conn: sqlite3.Connection = Depends(get_conn)):
+    return service.get_dispatch_pack(conn, pack_no)
+
+
+@app.post(
+    "/api/dispatch-packs/{pack_no}/claims",
+    tags=["外发补标"],
+    summary="回收外发补标（区间基于外发稿，含起点不含终点）",
+    description=(
+        "每条区间必须完整落在同一段未遮盖原文内，服务端按发包时的映射换算回原稿坐标。"
+        "首次回收时只要有无效区间或原稿已换版，整包退回且不落库。"
+        "已收包原样重送返回首次回执（换版、重启后亦同）；同号异文返回 409 claim_mismatch。"
+    ),
+)
+def claim_dispatch_pack(
+    pack_no: str,
+    payload: DispatchClaimIn,
+    conn: sqlite3.Connection = Depends(get_conn),
+):
+    intervals = [
+        (item.start, item.end, item.label) for item in payload.annotations
+    ]
+    return service.claim_dispatch_pack(conn, pack_no=pack_no, intervals=intervals)
+
+
+@app.get(
+    "/api/dispatch-packs/{pack_no}/receipt",
+    tags=["外发补标"],
+    summary="查询回收回执",
+    description="包已回收时返回首次回执；尚未回收返回 404。",
+)
+def get_dispatch_receipt(
+    pack_no: str, conn: sqlite3.Connection = Depends(get_conn)
+):
+    return service.get_dispatch_receipt(conn, pack_no)

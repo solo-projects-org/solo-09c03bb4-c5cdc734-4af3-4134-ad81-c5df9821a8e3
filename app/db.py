@@ -55,6 +55,47 @@ CREATE TABLE IF NOT EXISTS review_items (
 
 CREATE INDEX IF NOT EXISTS idx_review_items_version
     ON review_items(version);
+
+-- 外发补标包：发包时冻结现行版正文、遮盖后的正文与遮盖区间。
+CREATE TABLE IF NOT EXISTS dispatch_packs (
+    pack_no TEXT PRIMARY KEY,
+    version INTEGER NOT NULL REFERENCES editions(version),
+    masked_text TEXT NOT NULL,
+    masked_spans_json TEXT NOT NULL,
+    source_annotation_ids_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+-- 外发包回收回执：一个包只收一次，原样重送返回这里保存的回执。
+CREATE TABLE IF NOT EXISTS dispatch_claims (
+    pack_no TEXT PRIMARY KEY REFERENCES dispatch_packs(pack_no),
+    version INTEGER NOT NULL REFERENCES editions(version),
+    payload_json TEXT NOT NULL,
+    receipt_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+-- 回收得到的标注：保留外发稿坐标，便于审计；标注本身同时写入 annotations。
+CREATE TABLE IF NOT EXISTS dispatch_claim_annotations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pack_no TEXT NOT NULL REFERENCES dispatch_claims(pack_no),
+    position INTEGER NOT NULL,
+    annotation_id INTEGER NOT NULL REFERENCES annotations(id),
+    version INTEGER NOT NULL REFERENCES editions(version),
+    masked_start INTEGER NOT NULL,
+    masked_end INTEGER NOT NULL,
+    start INTEGER NOT NULL,
+    end INTEGER NOT NULL,
+    label TEXT NOT NULL,
+    UNIQUE(pack_no, position),
+    CHECK (masked_start >= 0),
+    CHECK (masked_end > masked_start),
+    CHECK (start >= 0),
+    CHECK (end > start)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dispatch_claim_annotations_pack
+    ON dispatch_claim_annotations(pack_no);
 """
 
 
